@@ -41,7 +41,12 @@ export default async function handler(req, res) {
     });
 
     // TODO: Uncomment below for actual Wikipedia integration once API is working
-    /*
+
+
+
+
+
+    
     // Search for Wikipedia pages related to the topic
     const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&format=json&list=search&srsearch=${encodeURIComponent(topic + ' timeline history events')}&srlimit=3&origin=*`;
     
@@ -87,7 +92,12 @@ export default async function handler(req, res) {
       source: `https://en.wikipedia.org/wiki/${encodeURIComponent(pageTitle)}`,
       events
     });
-    */
+
+
+
+
+
+    
 
   } catch (error) {
     console.error('API Error:', error);
