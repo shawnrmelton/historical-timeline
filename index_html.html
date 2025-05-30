@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Historical Timeline Explorer</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="header">
+        <h1>Multi-Topic Historical Timeline</h1>
+        <div class="search-container">
+            <div class="search-input-container">
+                <input type="text" class="search-input" id="topicInput" placeholder="Enter a historical topic (e.g., World Wars, Space Exploration, Art Movements)..." maxlength="50">
+                <button class="add-topic-btn" id="addTopicBtn" title="Add Topic">+</button>
+            </div>
+            <div class="active-topics" id="activeTopics"></div>
+        </div>
+    </div>
+
+    <div id="timelinesContainer">
+        <div class="empty-state">
+            <h2>🔍 Start Exploring History</h2>
+            <p>Search for up to 5 historical topics to see how events unfolded across different areas simultaneously.</p>
+            <p style="margin-top: 1rem; font-size: 0.9rem; opacity: 0.8;">Try topics like: "World Wars", "Scientific Revolution", "Renaissance Art", "Space Exploration", "Industrial Revolution"</p>
+        </div>
+    </div>
+
+    <div class="year-ruler" id="yearRuler" style="display: none;">
+        <div class="ruler-content" id="rulerContent"></div>
+    </div>
+
+    <div class="controls" id="controls" style="display: none;">
+        <button class="control-btn" onclick="scrollToStart()" title="Go to beginning">⏮</button>
+        <button class="control-btn" onclick="scrollLeft()" title="Scroll left">◀</button>
+        <button class="control-btn" onclick="scrollRight()" title="Scroll right">▶</button>
+        <button class="control-btn" onclick="scrollToEnd()" title="Go to end">⏭</button>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
