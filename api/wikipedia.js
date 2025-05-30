@@ -20,35 +20,10 @@ export default async function handler(req, res) {
   }
 
   try {
-    // For now, let's return some test data to verify the API is working
-    const testEvents = [
-      {
-        year: 2024,
-        title: `API Test for ${topic}`,
-        description: `This is a test event for ${topic} from the Wikipedia API function.`
-      },
-      {
-        year: 2023,
-        title: `Another ${topic} Event`,
-        description: `Second test event to verify the API is working properly.`
-      }
-    ];
-
-    return res.status(200).json({
-      topic,
-      source: 'Test API',
-      events: testEvents
-    });
-
-    // TODO: Uncomment below for actual Wikipedia integration once API is working
-
-
-
-
-
+    console.log(`Searching Wikipedia for: ${topic}`);
     
     // Search for Wikipedia pages related to the topic
-    const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&format=json&list=search&srsearch=${encodeURIComponent(topic + ' timeline history events')}&srlimit=3&origin=*`;
+    const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&format=json&list=search&srsearch=${encodeURIComponent(topic + ' timeline history events chronology')}&srlimit=3&origin=*`;
     
     const searchResponse = await fetch(searchUrl);
     
@@ -57,94 +32,163 @@ export default async function handler(req, res) {
     }
     
     const searchData = await searchResponse.json();
+    console.log(`Found ${searchData.query?.search?.length || 0} pages`);
     
     if (!searchData.query?.search?.length) {
-      return res.status(404).json({ error: 'No Wikipedia pages found for this topic' });
+      return res.status(404).json({ 
+        error: 'No Wikipedia pages found for this topic',
+        events: []
+      });
     }
 
-    // Get the most relevant page
-    const pageTitle = searchData.query.search[0].title;
+    // Try multiple pages to get more events
+    let allEvents = [];
+    const pagesToTry = Math.min(3, searchData.query.search.length);
     
-    // Fetch page content
-    const contentUrl = `https://en.wikipedia.org/w/api.php?action=query&format=json&titles=${encodeURIComponent(pageTitle)}&prop=extracts&exintro=false&explaintext=true&origin=*`;
-    
-    const contentResponse = await fetch(contentUrl);
-    
-    if (!contentResponse.ok) {
-      throw new Error(`Wikipedia content fetch failed: ${contentResponse.status}`);
-    }
-    
-    const contentData = await contentResponse.json();
-    const pages = contentData.query.pages;
-    const pageId = Object.keys(pages)[0];
-    
-    if (pageId === '-1') {
-      return res.status(404).json({ error: 'Wikipedia page not found' });
-    }
-    
-    const pageContent = pages[pageId]?.extract || '';
+    for (let i = 0; i < pagesToTry; i++) {
+      const pageTitle = searchData.query.search[i].title;
+      console.log(`Fetching content for: ${pageTitle}`);
+      
+      try {
+        // Fetch page content
+        const contentUrl = `https://en.wikipedia.org/w/api.php?action=query&format=json&titles=${encodeURIComponent(pageTitle)}&prop=extracts&exintro=false&explaintext=true&exsectionformat=plain&origin=*`;
+        
+        const contentResponse = await fetch(contentUrl);
+        
+        if (!contentResponse.ok) {
+          console.log(`Failed to fetch ${pageTitle}: ${contentResponse.status}`);
+          continue;
+        }
+        
+        const contentData = await contentResponse.json();
+        const pages = contentData.query.pages;
+        const pageId = Object.keys(pages)[0];
+        
+        if (pageId === '-1') {
+          console.log(`Page not found: ${pageTitle}`);
+          continue;
+        }
+        
+        const pageContent = pages[pageId]?.extract || '';
+        console.log(`Got ${pageContent.length} characters from ${pageTitle}`);
 
-    // Extract events from content
-    const events = extractEvents(pageContent, topic);
+        // Extract events from this page
+        const events = extractEvents(pageContent, topic, pageTitle);
+        allEvents = allEvents.concat(events);
+        
+      } catch (error) {
+        console.log(`Error processing ${pageTitle}: ${error.message}`);
+      }
+    }
+
+    // Remove duplicates and sort
+    const uniqueEvents = removeDuplicateEvents(allEvents);
+    const sortedEvents = uniqueEvents
+      .sort((a, b) => a.year - b.year)
+      .slice(0, 15); // Limit to 15 events
+
+    console.log(`Returning ${sortedEvents.length} events for ${topic}`);
 
     return res.status(200).json({
       topic,
-      source: `https://en.wikipedia.org/wiki/${encodeURIComponent(pageTitle)}`,
-      events
+      source: `Wikipedia search for "${topic}"`,
+      events: sortedEvents
     });
-
-
-
-
-
-    
 
   } catch (error) {
     console.error('API Error:', error);
     return res.status(500).json({ 
-      error: 'Failed to fetch data',
-      details: error.message 
+      error: 'Failed to fetch data from Wikipedia',
+      details: error.message,
+      events: []
     });
   }
 }
 
-function extractEvents(content, topic) {
+function extractEvents(content, topic, pageTitle) {
   const events = [];
   
-  // Simple regex to find years and associated text
-  const yearPattern = /\b(1[0-9]{3}|20[0-2][0-9])\b/g;
+  // Enhanced regex patterns for finding years
+  const yearPatterns = [
+    /\b(1[0-9]{3}|20[0-2][0-9])\b/g,  // Standard years
+    /\b(1[0-9]{3}|20[0-2][0-9])s?\b/g, // Years with optional 's'
+    /In\s+(1[0-9]{3}|20[0-2][0-9])/g,  // "In YYYY"
+    /During\s+(1[0-9]{3}|20[0-2][0-9])/g // "During YYYY"
+  ];
+  
+  // Split content into sentences and paragraphs
   const sentences = content.split(/[.!?]+/);
   
   sentences.forEach(sentence => {
-    const yearMatch = sentence.match(yearPattern);
-    if (yearMatch) {
-      yearMatch.forEach(year => {
-        const yearNum = parseInt(year);
-        
-        // Skip future years or very old years
-        if (yearNum < 1000 || yearNum > 2024) return;
-        
-        // Extract a title from the sentence (first few words)
-        const words = sentence.trim().split(' ').slice(0, 8);
-        const title = words.join(' ').replace(/^(In |The |On |During )/i, '');
-        
-        // Clean up the description
-        const description = sentence.trim().substring(0, 150) + (sentence.length > 150 ? '...' : '');
-        
-        // Avoid duplicates
-        if (!events.some(e => e.year === yearNum && e.title.includes(title.substring(0, 20)))) {
+    const trimmed = sentence.trim();
+    if (trimmed.length < 20) return; // Skip very short sentences
+    
+    // Try each year pattern
+    yearPatterns.forEach(pattern => {
+      const matches = trimmed.match(pattern);
+      if (matches) {
+        matches.forEach(match => {
+          const year = parseInt(match.replace(/[^\d]/g, ''));
+          
+          // Skip invalid years
+          if (year < 1000 || year > 2024) return;
+          
+          // Extract meaningful title from sentence
+          const title = extractTitle(trimmed, topic);
+          if (!title || title.length < 5) return;
+          
+          // Clean description
+          const description = trimmed.length > 200 ? 
+            trimmed.substring(0, 180) + '...' : 
+            trimmed;
+          
           events.push({
-            year: yearNum,
-            title: title || `${topic} event`,
-            description: description || `Event related to ${topic} in ${year}`
+            year,
+            title,
+            description,
+            source: pageTitle
           });
-        }
-      });
-    }
+        });
+      }
+    });
   });
   
-  // Sort by year and limit results
-  return events
-    .sort((a, b) => a.year - b.year)
-    .slice(0, 10);
+  return events;
+}
+
+function extractTitle(sentence, topic) {
+  // Remove common prefixes
+  let title = sentence.replace(/^(In|During|The|On|At|By|After|Before|Following|Prior to)\s+/i, '');
+  
+  // Remove year from beginning
+  title = title.replace(/^\d{4}[^\w]*/, '');
+  
+  // Take first meaningful part (up to comma, semicolon, or after 8 words)
+  const parts = title.split(/[,;]/);
+  title = parts[0];
+  
+  const words = title.split(' ').slice(0, 8);
+  title = words.join(' ');
+  
+  // Clean up
+  title = title.replace(/\s+/g, ' ').trim();
+  
+  // Capitalize first letter
+  if (title.length > 0) {
+    title = title.charAt(0).toUpperCase() + title.slice(1);
+  }
+  
+  return title;
+}
+
+function removeDuplicateEvents(events) {
+  const seen = new Set();
+  return events.filter(event => {
+    const key = `${event.year}-${event.title.substring(0, 30)}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }
