@@ -13,7 +13,7 @@ A multi-topic historical timeline that allows users to explore how events across
 
 ## Live Demo
 
-🚀 **[View Live Site](https://your-site.vercel.app)** (will be your URL after deployment)
+🚀 **[View Live Site](https://historical-timeline-smoky.vercel.app/)** (will be your URL after deployment)
 
 ## Local Development
 
