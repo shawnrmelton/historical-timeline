@@ -1,4 +1,4 @@
-// Sample data - this will be replaced with API calls
+// Sample data - fallback when API fails
 const sampleData = {
     'world wars': [
         { year: 1914, title: 'WWI Begins', description: 'Archduke Franz Ferdinand assassinated, triggering World War I' },
@@ -43,32 +43,40 @@ const sampleData = {
 };
 
 let activeTopics = [];
+let topicData = {}; // Store fetched data for each topic
 let timelineWrapper = null;
 let allYears = [];
 let yearToPosition = {};
 
 const topicColors = ['topic-1', 'topic-2', 'topic-3', 'topic-4', 'topic-5'];
 
-// API function to fetch topic data (placeholder for Wikipedia API)
+// API function to fetch topic data
 async function fetchTopicData(topicName) {
-    // For now, return sample data
-    // Later, this will call your Wikipedia API
-    if (sampleData[topicName.toLowerCase()]) {
-        return sampleData[topicName.toLowerCase()];
+    const normalizedTopic = topicName.toLowerCase();
+    
+    // First check if we have sample data
+    if (sampleData[normalizedTopic]) {
+        console.log(`Using sample data for: ${topicName}`);
+        return sampleData[normalizedTopic];
     }
     
-    // Simulate API call delay
-    await new Promise(resolve => setTimeout(resolve, 500));
-    
-    // Try to fetch from Wikipedia API (placeholder)
+    // Try to fetch from API
     try {
+        console.log(`Fetching from API for: ${topicName}`);
         const response = await fetch(`/api/wikipedia?topic=${encodeURIComponent(topicName)}`);
+        
         if (response.ok) {
             const data = await response.json();
-            return data.events || [];
+            console.log('API Response:', data);
+            
+            if (data.events && data.events.length > 0) {
+                return data.events;
+            }
         }
+        
+        console.log('API response not valid, no events found');
     } catch (error) {
-        console.log('API not available, using sample data');
+        console.error('API call failed:', error);
     }
     
     return null;
@@ -76,7 +84,7 @@ async function fetchTopicData(topicName) {
 
 async function addTopic() {
     const input = document.getElementById('topicInput');
-    const topicName = input.value.trim().toLowerCase();
+    const topicName = input.value.trim();
     
     if (!topicName || activeTopics.length >= 5) return;
     if (activeTopics.includes(topicName)) {
@@ -101,11 +109,16 @@ async function addTopic() {
             return;
         }
 
+        // Store the data
+        topicData[topicName] = events;
         activeTopics.push(topicName);
         input.value = '';
+        
+        console.log(`Added topic "${topicName}" with ${events.length} events`);
         updateUI();
         
     } catch (error) {
+        console.error('Error adding topic:', error);
         showError('Failed to fetch topic data. Please try again.');
         if (activeTopics.length === 0) {
             container.innerHTML = getEmptyStateHTML();
@@ -115,6 +128,7 @@ async function addTopic() {
 
 function removeTopic(topicName) {
     activeTopics = activeTopics.filter(topic => topic !== topicName);
+    delete topicData[topicName];
     updateUI();
 }
 
@@ -169,7 +183,7 @@ function calculateUnifiedTimeline() {
     // Get all unique years from all active topics
     const yearSet = new Set();
     activeTopics.forEach(topic => {
-        const events = sampleData[topic] || [];
+        const events = topicData[topic] || [];
         events.forEach(event => {
             yearSet.add(event.year);
         });
@@ -185,6 +199,9 @@ function calculateUnifiedTimeline() {
     allYears.forEach((year, index) => {
         yearToPosition[year] = index * spacing;
     });
+    
+    console.log('Years found:', allYears);
+    console.log('Year positions:', yearToPosition);
 }
 
 function updateTimelines() {
@@ -213,13 +230,16 @@ function updateTimelines() {
     // Create topic labels and timeline tracks
     activeTopics.forEach((topic, index) => {
         const colorClass = topicColors[index % topicColors.length];
+        const events = topicData[topic] || [];
+        
+        console.log(`Creating timeline for "${topic}" with ${events.length} events`);
         
         // Topic label
         const label = document.createElement('div');
         label.className = `topic-label ${colorClass}`;
         label.innerHTML = `
             <div class="topic-label-color ${colorClass}"></div>
-            <span>${topic.charAt(0).toUpperCase() + topic.slice(1)}</span>
+            <span>${topic.charAt(0).toUpperCase() + topic.slice(1)} (${events.length})</span>
         `;
         topicLabels.appendChild(label);
 
@@ -234,23 +254,26 @@ function updateTimelines() {
 
         // Add events to this track
         const eventsContainer = track.querySelector('.timeline-events');
-        const events = sampleData[topic] || [];
         
         events.forEach(event => {
-            const eventElement = document.createElement('div');
-            eventElement.className = 'timeline-event';
-            eventElement.style.left = `${yearToPosition[event.year]}vw`;
-            
-            eventElement.innerHTML = `
-                <div class="event-marker"></div>
-                <div class="event-card">
-                    <div class="event-year">${event.year}</div>
-                    <div class="event-title">${event.title}</div>
-                    <div class="event-description">${event.description}</div>
-                </div>
-            `;
-            
-            eventsContainer.appendChild(eventElement);
+            const position = yearToPosition[event.year];
+            if (position !== undefined) {
+                const eventElement = document.createElement('div');
+                eventElement.className = 'timeline-event';
+                eventElement.style.left = `${position}vw`;
+                
+                eventElement.innerHTML = `
+                    <div class="event-marker"></div>
+                    <div class="event-card">
+                        <div class="event-year">${event.year}</div>
+                        <div class="event-title">${event.title}</div>
+                        <div class="event-description">${event.description}</div>
+                    </div>
+                `;
+                
+                eventsContainer.appendChild(eventElement);
+                console.log(`Added event: ${event.year} - ${event.title}`);
+            }
         });
     });
 
