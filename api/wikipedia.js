@@ -1,5 +1,4 @@
 export default async function handler(req, res) {
-  // Enable CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -9,186 +8,259 @@ export default async function handler(req, res) {
     return;
   }
 
-  if (req.method !== 'GET') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
-
   const { topic } = req.query;
-
   if (!topic) {
     return res.status(400).json({ error: 'Topic parameter is required' });
   }
 
   try {
-    console.log(`Searching Wikipedia for: ${topic}`);
+    console.log(`Searching Wikidata for: ${topic}`);
     
-    // Search for Wikipedia pages related to the topic
-    const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&format=json&list=search&srsearch=${encodeURIComponent(topic + ' timeline history events chronology')}&srlimit=3&origin=*`;
+    // Try multiple SPARQL queries for better coverage
+    let events = [];
     
-    const searchResponse = await fetch(searchUrl);
+    // Query 1: Direct topic search
+    const directEvents = await queryWikidata(buildDirectQuery(topic));
+    events = events.concat(directEvents);
     
-    if (!searchResponse.ok) {
-      throw new Error(`Wikipedia search failed: ${searchResponse.status}`);
-    }
+    // Query 2: Category-based search
+    const categoryEvents = await queryWikidata(buildCategoryQuery(topic));
+    events = events.concat(categoryEvents);
     
-    const searchData = await searchResponse.json();
-    console.log(`Found ${searchData.query?.search?.length || 0} pages`);
-    
-    if (!searchData.query?.search?.length) {
-      return res.status(404).json({ 
-        error: 'No Wikipedia pages found for this topic',
-        events: []
-      });
-    }
-
-    // Try multiple pages to get more events
-    let allEvents = [];
-    const pagesToTry = Math.min(3, searchData.query.search.length);
-    
-    for (let i = 0; i < pagesToTry; i++) {
-      const pageTitle = searchData.query.search[i].title;
-      console.log(`Fetching content for: ${pageTitle}`);
-      
-      try {
-        // Fetch page content
-        const contentUrl = `https://en.wikipedia.org/w/api.php?action=query&format=json&titles=${encodeURIComponent(pageTitle)}&prop=extracts&exintro=false&explaintext=true&exsectionformat=plain&origin=*`;
-        
-        const contentResponse = await fetch(contentUrl);
-        
-        if (!contentResponse.ok) {
-          console.log(`Failed to fetch ${pageTitle}: ${contentResponse.status}`);
-          continue;
-        }
-        
-        const contentData = await contentResponse.json();
-        const pages = contentData.query.pages;
-        const pageId = Object.keys(pages)[0];
-        
-        if (pageId === '-1') {
-          console.log(`Page not found: ${pageTitle}`);
-          continue;
-        }
-        
-        const pageContent = pages[pageId]?.extract || '';
-        console.log(`Got ${pageContent.length} characters from ${pageTitle}`);
-
-        // Extract events from this page
-        const events = extractEvents(pageContent, topic, pageTitle);
-        allEvents = allEvents.concat(events);
-        
-      } catch (error) {
-        console.log(`Error processing ${pageTitle}: ${error.message}`);
-      }
-    }
+    // Query 3: Subject area search
+    const subjectEvents = await queryWikidata(buildSubjectQuery(topic));
+    events = events.concat(subjectEvents);
 
     // Remove duplicates and sort
-    const uniqueEvents = removeDuplicateEvents(allEvents);
+    const uniqueEvents = removeDuplicates(events);
     const sortedEvents = uniqueEvents
       .sort((a, b) => a.year - b.year)
-      .slice(0, 15); // Limit to 15 events
+      .slice(0, 20);
 
-    console.log(`Returning ${sortedEvents.length} events for ${topic}`);
+    console.log(`Found ${sortedEvents.length} events for ${topic}`);
 
     return res.status(200).json({
       topic,
-      source: `Wikipedia search for "${topic}"`,
+      source: 'Wikidata',
       events: sortedEvents
     });
 
   } catch (error) {
-    console.error('API Error:', error);
+    console.error('Wikidata API Error:', error);
     return res.status(500).json({ 
-      error: 'Failed to fetch data from Wikipedia',
+      error: 'Failed to fetch data from Wikidata',
       details: error.message,
       events: []
     });
   }
 }
 
-function extractEvents(content, topic, pageTitle) {
-  const events = [];
+function buildDirectQuery(topic) {
+  return `
+    SELECT DISTINCT ?event ?eventLabel ?date ?description ?typeLabel WHERE {
+      ?event rdfs:label ?eventLabel .
+      ?event wdt:P31 ?type .
+      ?event wdt:P585 ?date .
+      
+      # Filter for historical events and related items
+      FILTER(
+        ?type = wd:Q1190554 ||  # historical event
+        ?type = wd:Q645883 ||   # military operation  
+        ?type = wd:Q178561 ||   # battle
+        ?type = wd:Q180684 ||   # conflict
+        ?type = wd:Q199655 ||   # revolution
+        ?type = wd:Q40165 ||    # discovery
+        ?type = wd:Q184937      # invention
+      )
+      
+      # Search in labels and descriptions
+      FILTER(
+        CONTAINS(LCASE(?eventLabel), "${topic.toLowerCase()}") ||
+        CONTAINS(LCASE(STR(?description)), "${topic.toLowerCase()}")
+      )
+      
+      OPTIONAL { ?event schema:description ?description . FILTER(LANG(?description) = "en") }
+      
+      FILTER(LANG(?eventLabel) = "en")
+      FILTER(YEAR(?date) >= 1000 && YEAR(?date) <= 2024)
+      
+      SERVICE wikibase:label { bd:serviceParam wikibase:language "en" . }
+    }
+    ORDER BY ?date
+    LIMIT 20
+  `;
+}
+
+function buildCategoryQuery(topic) {
+  // Search for events in specific categories related to the topic
+  const categoryMap = {
+    'war': 'wd:Q198',          # war
+    'space': 'wd:Q7481',       # space exploration
+    'science': 'wd:Q336',      # science
+    'politics': 'wd:Q7163',    # politics
+    'revolution': 'wd:Q10931', # revolution
+    'battle': 'wd:Q178561',    # battle
+    'discovery': 'wd:Q40165',  # discovery
+    'invention': 'wd:Q184937', # invention
+    'empire': 'wd:Q28171280',  # ancient civilization
+    'rome': 'wd:Q2277',       # Roman Empire
+    'egypt': 'wd:Q11768',     # Ancient Egypt
+    'greece': 'wd:Q11772'     # Ancient Greece
+  };
+
+  // Find relevant category
+  const searchTerm = topic.toLowerCase();
+  let categoryId = null;
   
-  // Enhanced regex patterns for finding years
-  const yearPatterns = [
-    /\b(1[0-9]{3}|20[0-2][0-9])\b/g,  // Standard years
-    /\b(1[0-9]{3}|20[0-2][0-9])s?\b/g, // Years with optional 's'
-    /In\s+(1[0-9]{3}|20[0-2][0-9])/g,  // "In YYYY"
-    /During\s+(1[0-9]{3}|20[0-2][0-9])/g // "During YYYY"
-  ];
-  
-  // Split content into sentences and paragraphs
-  const sentences = content.split(/[.!?]+/);
-  
-  sentences.forEach(sentence => {
-    const trimmed = sentence.trim();
-    if (trimmed.length < 20) return; // Skip very short sentences
+  for (const [key, value] of Object.entries(categoryMap)) {
+    if (searchTerm.includes(key)) {
+      categoryId = value;
+      break;
+    }
+  }
+
+  if (!categoryId) {
+    return buildGenericQuery(topic);
+  }
+
+  return `
+    SELECT DISTINCT ?event ?eventLabel ?date ?description WHERE {
+      ?event wdt:P31/wdt:P279* ${categoryId} .
+      ?event wdt:P585 ?date .
+      ?event rdfs:label ?eventLabel .
+      
+      OPTIONAL { ?event schema:description ?description . FILTER(LANG(?description) = "en") }
+      
+      FILTER(LANG(?eventLabel) = "en")
+      FILTER(YEAR(?date) >= 1000 && YEAR(?date) <= 2024)
+      
+      SERVICE wikibase:label { bd:serviceParam wikibase:language "en" . }
+    }
+    ORDER BY ?date
+    LIMIT 15
+  `;
+}
+
+function buildSubjectQuery(topic) {
+  return `
+    SELECT DISTINCT ?event ?eventLabel ?date ?description WHERE {
+      ?event wdt:P921 ?subject .
+      ?subject rdfs:label ?subjectLabel .
+      ?event wdt:P585 ?date .
+      ?event rdfs:label ?eventLabel .
+      
+      FILTER(CONTAINS(LCASE(?subjectLabel), "${topic.toLowerCase()}"))
+      
+      OPTIONAL { ?event schema:description ?description . FILTER(LANG(?description) = "en") }
+      
+      FILTER(LANG(?eventLabel) = "en")
+      FILTER(LANG(?subjectLabel) = "en")
+      FILTER(YEAR(?date) >= 1000 && YEAR(?date) <= 2024)
+      
+      SERVICE wikibase:label { bd:serviceParam wikibase:language "en" . }
+    }
+    ORDER BY ?date
+    LIMIT 15
+  `;
+}
+
+function buildGenericQuery(topic) {
+  return `
+    SELECT DISTINCT ?event ?eventLabel ?date ?description WHERE {
+      ?event ?p ?o .
+      ?event wdt:P585 ?date .
+      ?event rdfs:label ?eventLabel .
+      
+      # Search broadly in any property that might contain our topic
+      FILTER(
+        CONTAINS(LCASE(?eventLabel), "${topic.toLowerCase()}") ||
+        CONTAINS(LCASE(STR(?o)), "${topic.toLowerCase()}")
+      )
+      
+      # Ensure it's some kind of event or historical item
+      ?event wdt:P31 ?type .
+      FILTER(?type != wd:Q5)  # Not a person
+      
+      OPTIONAL { ?event schema:description ?description . FILTER(LANG(?description) = "en") }
+      
+      FILTER(LANG(?eventLabel) = "en")
+      FILTER(YEAR(?date) >= 1000 && YEAR(?date) <= 2024)
+      
+      SERVICE wikibase:label { bd:serviceParam wikibase:language "en" . }
+    }
+    ORDER BY ?date
+    LIMIT 10
+  `;
+}
+
+async function queryWikidata(sparqlQuery) {
+  try {
+    const url = `https://query.wikidata.org/sparql?query=${encodeURIComponent(sparqlQuery)}&format=json`;
     
-    // Try each year pattern
-    yearPatterns.forEach(pattern => {
-      const matches = trimmed.match(pattern);
-      if (matches) {
-        matches.forEach(match => {
-          const year = parseInt(match.replace(/[^\d]/g, ''));
-          
-          // Skip invalid years
-          if (year < 1000 || year > 2024) return;
-          
-          // Extract meaningful title from sentence
-          const title = extractTitle(trimmed, topic);
-          if (!title || title.length < 5) return;
-          
-          // Clean description
-          const description = trimmed.length > 200 ? 
-            trimmed.substring(0, 180) + '...' : 
-            trimmed;
-          
-          events.push({
-            year,
-            title,
-            description,
-            source: pageTitle
-          });
-        });
+    const response = await fetch(url, {
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'HistoricalTimeline/1.0 (https://historical-timeline-smoky.vercel.app)'
       }
     });
-  });
-  
-  return events;
-}
 
-function extractTitle(sentence, topic) {
-  // Remove common prefixes
-  let title = sentence.replace(/^(In|During|The|On|At|By|After|Before|Following|Prior to)\s+/i, '');
-  
-  // Remove year from beginning
-  title = title.replace(/^\d{4}[^\w]*/, '');
-  
-  // Take first meaningful part (up to comma, semicolon, or after 8 words)
-  const parts = title.split(/[,;]/);
-  title = parts[0];
-  
-  const words = title.split(' ').slice(0, 8);
-  title = words.join(' ');
-  
-  // Clean up
-  title = title.replace(/\s+/g, ' ').trim();
-  
-  // Capitalize first letter
-  if (title.length > 0) {
-    title = title.charAt(0).toUpperCase() + title.slice(1);
+    if (!response.ok) {
+      console.log(`Wikidata query failed: ${response.status}`);
+      return [];
+    }
+
+    const data = await response.json();
+    
+    if (!data.results || !data.results.bindings) {
+      return [];
+    }
+
+    const events = data.results.bindings.map(binding => {
+      const date = new Date(binding.date.value);
+      const year = date.getFullYear();
+      
+      // Handle negative years (BCE)
+      const yearValue = binding.date.value.startsWith('-') ? 
+        -Math.abs(year) : year;
+      
+      return {
+        year: yearValue,
+        title: cleanTitle(binding.eventLabel.value),
+        description: binding.description?.value || 
+                    binding.typeLabel?.value || 
+                    'Historical event',
+        source: 'Wikidata'
+      };
+    });
+
+    return events.filter(event => 
+      event.year >= -3000 && 
+      event.year <= 2024 && 
+      event.title.length > 3
+    );
+
+  } catch (error) {
+    console.log('Wikidata query error:', error);
+    return [];
   }
-  
-  return title;
 }
 
-function removeDuplicateEvents(events) {
-  const seen = new Set();
+function cleanTitle(title) {
+  // Remove common prefixes and clean up titles
+  return title
+    .replace(/^(The |A |An )/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function removeDuplicates(events) {
+  const seen = new Map();
   return events.filter(event => {
-    const key = `${event.year}-${event.title.substring(0, 30)}`;
+    const key = `${event.year}-${event.title.substring(0, 30).toLowerCase()}`;
     if (seen.has(key)) {
       return false;
     }
-    seen.add(key);
+    seen.set(key, true);
     return true;
   });
 }
