@@ -1,4 +1,5 @@
 export default async function handler(req, res) {
+  // Enable CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -8,188 +9,186 @@ export default async function handler(req, res) {
     return;
   }
 
+  if (req.method !== 'GET') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
+
   const { topic } = req.query;
+
   if (!topic) {
     return res.status(400).json({ error: 'Topic parameter is required' });
   }
 
   try {
-    console.log(`Searching Wikidata for: ${topic}`);
+    console.log(`Searching Wikipedia for: ${topic}`);
     
-    // Search for relevant entities in Wikidata
-    const searchQuery = `
-      SELECT DISTINCT ?event ?eventLabel ?date ?description WHERE {
-        ?event rdfs:label ?eventLabel .
-        ?event wdt:P31/wdt:P279* wd:Q1190554 . # instance of historical event
-        ?event wdt:P585 ?date . # point in time
-        
-        FILTER(CONTAINS(LCASE(?eventLabel), "${topic.toLowerCase()}"))
-        
-        OPTIONAL { ?event schema:description ?description . }
-        FILTER(LANG(?eventLabel) = "en")
-        FILTER(YEAR(?date) >= 1000 && YEAR(?date) <= 2024)
-      }
-      ORDER BY ?date
-      LIMIT 20
-    `;
-
-    const wikidataUrl = `https://query.wikidata.org/sparql?query=${encodeURIComponent(searchQuery)}&format=json`;
+    // Search for Wikipedia pages related to the topic
+    const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&format=json&list=search&srsearch=${encodeURIComponent(topic + ' timeline history events chronology')}&srlimit=3&origin=*`;
     
-    const response = await fetch(wikidataUrl, {
-      headers: {
-        'Accept': 'application/json',
-        'User-Agent': 'HistoricalTimeline/1.0'
-      }
-    });
-
-    if (!response.ok) {
-      throw new Error(`Wikidata query failed: ${response.status}`);
+    const searchResponse = await fetch(searchUrl);
+    
+    if (!searchResponse.ok) {
+      throw new Error(`Wikipedia search failed: ${searchResponse.status}`);
     }
-
-    const data = await response.json();
-    const events = data.results.bindings.map(binding => {
-      const date = new Date(binding.date.value);
-      return {
-        year: date.getFullYear(),
-        title: binding.eventLabel.value,
-        description: binding.description?.value || `Historical event related to ${topic}`,
-        source: 'Wikidata'
-      };
-    });
-
-    console.log(`Found ${events.length} Wikidata events for ${topic}`);
     
-    // If no Wikidata results, try alternative search
-    if (events.length === 0) {
-      const alternativeEvents = await searchAlternativeSources(topic);
-      return res.status(200).json({
-        topic,
-        source: 'Alternative sources',
-        events: alternativeEvents
-      });
-    }
-
-    return res.status(200).json({
-      topic,
-      source: 'Wikidata',
-      events: events.slice(0, 15)
-    });
-
-  } catch (error) {
-    console.error('Wikidata API Error:', error);
+    const searchData = await searchResponse.json();
+    console.log(`Found ${searchData.query?.search?.length || 0} pages`);
     
-    // Fallback to alternative sources
-    try {
-      const fallbackEvents = await searchAlternativeSources(topic);
-      return res.status(200).json({
-        topic,
-        source: 'Fallback sources',
-        events: fallbackEvents
-      });
-    } catch (fallbackError) {
-      return res.status(500).json({ 
-        error: 'Failed to fetch historical data',
+    if (!searchData.query?.search?.length) {
+      return res.status(404).json({ 
+        error: 'No Wikipedia pages found for this topic',
         events: []
       });
     }
+
+    // Try multiple pages to get more events
+    let allEvents = [];
+    const pagesToTry = Math.min(3, searchData.query.search.length);
+    
+    for (let i = 0; i < pagesToTry; i++) {
+      const pageTitle = searchData.query.search[i].title;
+      console.log(`Fetching content for: ${pageTitle}`);
+      
+      try {
+        // Fetch page content
+        const contentUrl = `https://en.wikipedia.org/w/api.php?action=query&format=json&titles=${encodeURIComponent(pageTitle)}&prop=extracts&exintro=false&explaintext=true&exsectionformat=plain&origin=*`;
+        
+        const contentResponse = await fetch(contentUrl);
+        
+        if (!contentResponse.ok) {
+          console.log(`Failed to fetch ${pageTitle}: ${contentResponse.status}`);
+          continue;
+        }
+        
+        const contentData = await contentResponse.json();
+        const pages = contentData.query.pages;
+        const pageId = Object.keys(pages)[0];
+        
+        if (pageId === '-1') {
+          console.log(`Page not found: ${pageTitle}`);
+          continue;
+        }
+        
+        const pageContent = pages[pageId]?.extract || '';
+        console.log(`Got ${pageContent.length} characters from ${pageTitle}`);
+
+        // Extract events from this page
+        const events = extractEvents(pageContent, topic, pageTitle);
+        allEvents = allEvents.concat(events);
+        
+      } catch (error) {
+        console.log(`Error processing ${pageTitle}: ${error.message}`);
+      }
+    }
+
+    // Remove duplicates and sort
+    const uniqueEvents = removeDuplicateEvents(allEvents);
+    const sortedEvents = uniqueEvents
+      .sort((a, b) => a.year - b.year)
+      .slice(0, 15); // Limit to 15 events
+
+    console.log(`Returning ${sortedEvents.length} events for ${topic}`);
+
+    return res.status(200).json({
+      topic,
+      source: `Wikipedia search for "${topic}"`,
+      events: sortedEvents
+    });
+
+  } catch (error) {
+    console.error('API Error:', error);
+    return res.status(500).json({ 
+      error: 'Failed to fetch data from Wikipedia',
+      details: error.message,
+      events: []
+    });
   }
 }
 
-async function searchAlternativeSources(topic) {
-  // Try multiple approaches for better coverage
+function extractEvents(content, topic, pageTitle) {
   const events = [];
   
-  // 1. Try BBC History API approach (simulated - you'd need to register)
-  const bbcEvents = await searchBBCHistory(topic);
-  events.push(...bbcEvents);
-  
-  // 2. Try Library of Congress Chronicling America (free API)
-  const locEvents = await searchLibraryOfCongress(topic);
-  events.push(...locEvents);
-  
-  // 3. Try OnThisDay API (free)
-  const otdEvents = await searchOnThisDay(topic);
-  events.push(...otdEvents);
-  
-  return events.slice(0, 15);
-}
-
-async function searchBBCHistory(topic) {
-  // BBC History would require API key - placeholder for now
-  // You could scrape BBC History timeline pages or use their educational APIs
-  return [
-    {
-      year: 1066,
-      title: `Norman Conquest (${topic} related)`,
-      description: `Major historical event connected to ${topic}`,
-      source: 'BBC History'
-    }
+  // Enhanced regex patterns for finding years
+  const yearPatterns = [
+    /\b(1[0-9]{3}|20[0-2][0-9])\b/g,  // Standard years
+    /\b(1[0-9]{3}|20[0-2][0-9])s?\b/g, // Years with optional 's'
+    /In\s+(1[0-9]{3}|20[0-2][0-9])/g,  // "In YYYY"
+    /During\s+(1[0-9]{3}|20[0-2][0-9])/g // "During YYYY"
   ];
+  
+  // Split content into sentences and paragraphs
+  const sentences = content.split(/[.!?]+/);
+  
+  sentences.forEach(sentence => {
+    const trimmed = sentence.trim();
+    if (trimmed.length < 20) return; // Skip very short sentences
+    
+    // Try each year pattern
+    yearPatterns.forEach(pattern => {
+      const matches = trimmed.match(pattern);
+      if (matches) {
+        matches.forEach(match => {
+          const year = parseInt(match.replace(/[^\d]/g, ''));
+          
+          // Skip invalid years
+          if (year < 1000 || year > 2024) return;
+          
+          // Extract meaningful title from sentence
+          const title = extractTitle(trimmed, topic);
+          if (!title || title.length < 5) return;
+          
+          // Clean description
+          const description = trimmed.length > 200 ? 
+            trimmed.substring(0, 180) + '...' : 
+            trimmed;
+          
+          events.push({
+            year,
+            title,
+            description,
+            source: pageTitle
+          });
+        });
+      }
+    });
+  });
+  
+  return events;
 }
 
-async function searchLibraryOfCongress(topic) {
-  try {
-    // Library of Congress Chronicling America API
-    const searchUrl = `https://chroniclingamerica.loc.gov/search/pages/results/?andtext=${encodeURIComponent(topic)}&format=json&sort=date`;
-    
-    const response = await fetch(searchUrl);
-    if (!response.ok) return [];
-    
-    const data = await response.json();
-    const events = [];
-    
-    // Process newspaper articles to extract historical events
-    if (data.items) {
-      data.items.slice(0, 5).forEach(item => {
-        const dateMatch = item.date?.match(/(\d{4})/);
-        if (dateMatch) {
-          events.push({
-            year: parseInt(dateMatch[1]),
-            title: item.title || `${topic} news coverage`,
-            description: `Historical newspaper coverage of ${topic}`,
-            source: 'Library of Congress'
-          });
-        }
-      });
-    }
-    
-    return events;
-  } catch (error) {
-    console.log('Library of Congress search failed:', error);
-    return [];
+function extractTitle(sentence, topic) {
+  // Remove common prefixes
+  let title = sentence.replace(/^(In|During|The|On|At|By|After|Before|Following|Prior to)\s+/i, '');
+  
+  // Remove year from beginning
+  title = title.replace(/^\d{4}[^\w]*/, '');
+  
+  // Take first meaningful part (up to comma, semicolon, or after 8 words)
+  const parts = title.split(/[,;]/);
+  title = parts[0];
+  
+  const words = title.split(' ').slice(0, 8);
+  title = words.join(' ');
+  
+  // Clean up
+  title = title.replace(/\s+/g, ' ').trim();
+  
+  // Capitalize first letter
+  if (title.length > 0) {
+    title = title.charAt(0).toUpperCase() + title.slice(1);
   }
+  
+  return title;
 }
 
-async function searchOnThisDay(topic) {
-  try {
-    // OnThisDay API - free historical events
-    const today = new Date();
-    const month = today.getMonth() + 1;
-    const day = today.getDate();
-    
-    const response = await fetch(`https://api.wikimedia.org/feed/v1/wikipedia/en/onthisday/all/${month}/${day}`);
-    if (!response.ok) return [];
-    
-    const data = await response.json();
-    const events = [];
-    
-    // Filter events related to our topic
-    if (data.events) {
-      data.events.forEach(event => {
-        if (event.text.toLowerCase().includes(topic.toLowerCase()) && event.year) {
-          events.push({
-            year: event.year,
-            title: event.text,
-            description: `Historical event from ${event.year} related to ${topic}`,
-            source: 'OnThisDay API'
-          });
-        }
-      });
+function removeDuplicateEvents(events) {
+  const seen = new Set();
+  return events.filter(event => {
+    const key = `${event.year}-${event.title.substring(0, 30)}`;
+    if (seen.has(key)) {
+      return false;
     }
-    
-    return events;
-  } catch (error) {
-    console.log('OnThisDay search failed:', error);
-    return [];
-  }
+    seen.add(key);
+    return true;
+  });
 }
