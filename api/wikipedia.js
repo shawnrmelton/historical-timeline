@@ -14,138 +14,176 @@ export default async function handler(req, res) {
   }
 
   try {
-    console.log(`Searching Wikidata for: ${topic}`);
+    console.log(`Generating AI timeline for: ${topic}`);
     
-    // First try a simple, reliable Wikidata query
-    const events = await queryWikidata(topic);
+    // Try AI generation first
+    const aiEvents = await generateTimelineWithAI(topic);
     
-    if (events.length > 0) {
-      console.log(`Found ${events.length} Wikidata events for ${topic}`);
+    if (aiEvents && aiEvents.length > 0) {
+      console.log(`AI generated ${aiEvents.length} events for ${topic}`);
       return res.status(200).json({
         topic,
-        source: 'Wikidata',
-        events: events.slice(0, 15)
+        source: 'AI Generated',
+        events: aiEvents
       });
     }
     
-    // If no Wikidata results, return helpful test data
-    console.log(`No Wikidata results for ${topic}, returning test data`);
+    // Fallback to structured prompt if API fails
+    const fallbackEvents = generateFallbackTimeline(topic);
+    
     return res.status(200).json({
       topic,
-      source: 'No Wikidata results - test data',
-      events: [
-        {
-          year: 2024,
-          title: `${topic} - No Results Found`,
-          description: `Try more specific terms like "French Revolution", "World War II", "Roman Empire", or "Space Race"`,
-          source: 'Suggestion'
-        }
-      ]
+      source: 'Structured Fallback',
+      events: fallbackEvents
     });
 
   } catch (error) {
-    console.error('Wikidata Error:', error);
+    console.error('AI Timeline Error:', error);
+    
+    // Always return something useful
+    const emergencyEvents = generateFallbackTimeline(topic);
+    
     return res.status(200).json({
       topic,
-      source: 'Error - test data',
-      events: [
-        {
-          year: 2024,
-          title: `${topic} - API Error`,
-          description: `Error: ${error.message}. Try sample topics like "world wars" or "space exploration"`,
-          source: 'Error'
-        }
-      ]
+      source: 'Emergency Fallback',
+      events: emergencyEvents
     });
   }
 }
 
-async function queryWikidata(topic) {
-  try {
-    // Simple, reliable SPARQL query for historical events
-    const sparqlQuery = `
-SELECT DISTINCT ?event ?eventLabel ?date ?description WHERE {
-  ?event wdt:P31/wdt:P279* wd:Q1190554 .
-  ?event wdt:P585 ?date .
-  ?event rdfs:label ?eventLabel .
+async function generateTimelineWithAI(topic) {
+  // You'll need to add your OpenAI API key as an environment variable in Vercel
+  const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
   
-  FILTER(CONTAINS(LCASE(?eventLabel), "${topic.toLowerCase()}"))
-  FILTER(LANG(?eventLabel) = "en")
-  FILTER(YEAR(?date) >= 1000 && YEAR(?date) <= 2024)
-  
-  OPTIONAL { 
-    ?event schema:description ?description . 
-    FILTER(LANG(?description) = "en") 
+  if (!OPENAI_API_KEY) {
+    console.log('No OpenAI API key found, using fallback');
+    return null;
   }
-  
-  SERVICE wikibase:label { bd:serviceParam wikibase:language "en" . }
-}
-ORDER BY ?date
-LIMIT 15
-    `.trim();
 
-    const url = `https://query.wikidata.org/sparql?query=${encodeURIComponent(sparqlQuery)}&format=json`;
-    
-    console.log('Querying Wikidata...');
-    
-    const response = await fetch(url, {
+  try {
+    const prompt = `Create a historical timeline for "${topic}". Return exactly 10-15 of the most important events in JSON format. Each event should have:
+- year: (number, use negative numbers for BCE)
+- title: (concise event name, 2-8 words)
+- description: (brief description, 10-25 words)
+
+Focus on the most historically significant events. Ensure chronological accuracy. Return only valid JSON array format.
+
+Example format:
+[
+  {"year": 1776, "title": "Declaration of Independence", "description": "American colonies declare independence from British rule"},
+  {"year": 1783, "title": "Treaty of Paris", "description": "Formal end to the American Revolutionary War"}
+]`;
+
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
       headers: {
-        'Accept': 'application/json',
-        'User-Agent': 'HistoricalTimeline/1.0 (educational-project)'
-      }
+        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'gpt-3.5-turbo',
+        messages: [
+          {
+            role: 'system',
+            content: 'You are a historical expert. Generate accurate, concise timelines in JSON format only. No additional text.'
+          },
+          {
+            role: 'user',
+            content: prompt
+          }
+        ],
+        max_tokens: 1500,
+        temperature: 0.3
+      })
     });
 
     if (!response.ok) {
-      console.log(`Wikidata query failed: ${response.status}`);
-      return [];
+      console.log(`OpenAI API failed: ${response.status}`);
+      return null;
     }
 
     const data = await response.json();
+    const content = data.choices[0]?.message?.content;
     
-    if (!data.results || !data.results.bindings) {
-      console.log('No results in Wikidata response');
-      return [];
+    if (!content) {
+      console.log('No content from OpenAI');
+      return null;
     }
 
-    console.log(`Raw Wikidata returned ${data.results.bindings.length} results`);
-
-    const events = data.results.bindings
-      .map(binding => {
-        try {
-          const date = new Date(binding.date.value);
-          const year = date.getFullYear();
-          
-          // Skip invalid years
-          if (year < 1000 || year > 2024) return null;
-          
-          return {
-            year: year,
-            title: cleanTitle(binding.eventLabel.value),
-            description: binding.description?.value || `Historical event related to ${topic}`,
-            source: 'Wikidata'
-          };
-        } catch (e) {
-          console.log('Error processing event:', e);
-          return null;
-        }
-      })
-      .filter(event => event !== null)
-      .filter(event => event.title.length > 3);
-
-    console.log(`Processed to ${events.length} valid events`);
-    return events;
+    // Parse the JSON response
+    const events = JSON.parse(content);
+    
+    // Validate and clean the events
+    return events
+      .filter(event => event.year && event.title && event.description)
+      .filter(event => event.year >= -3000 && event.year <= 2024)
+      .map(event => ({
+        year: parseInt(event.year),
+        title: event.title.trim(),
+        description: event.description.trim(),
+        source: 'AI Generated'
+      }))
+      .sort((a, b) => a.year - b.year)
+      .slice(0, 15);
 
   } catch (error) {
-    console.error('Wikidata query error:', error);
-    return [];
+    console.error('OpenAI API error:', error);
+    return null;
   }
 }
 
-function cleanTitle(title) {
-  if (!title) return 'Historical Event';
+function generateFallbackTimeline(topic) {
+  // Intelligent fallback based on topic analysis
+  const topicLower = topic.toLowerCase();
+  const currentYear = new Date().getFullYear();
   
-  return title
-    .replace(/^(The |A |An )/i, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+  // Topic-specific event templates
+  const templates = {
+    war: [
+      { yearOffset: -10, title: 'Conflict Begins', description: `Beginning of the ${topic}` },
+      { yearOffset: -5, title: 'Major Battle', description: `Significant military engagement during ${topic}` },
+      { yearOffset: 0, title: 'Turning Point', description: `Critical moment in the ${topic}` },
+      { yearOffset: 5, title: 'Conflict Ends', description: `Conclusion of the ${topic}` }
+    ],
+    revolution: [
+      { yearOffset: -5, title: 'Growing Tensions', description: `Social and political unrest leading to ${topic}` },
+      { yearOffset: 0, title: 'Revolution Begins', description: `Start of the ${topic}` },
+      { yearOffset: 2, title: 'Major Uprising', description: `Significant events during ${topic}` },
+      { yearOffset: 5, title: 'New Order', description: `Establishment of new government after ${topic}` }
+    ],
+    empire: [
+      { yearOffset: -100, title: 'Early Formation', description: `Origins and early expansion of ${topic}` },
+      { yearOffset: 0, title: 'Golden Age', description: `Peak period of ${topic}` },
+      { yearOffset: 100, title: 'Decline Begins', description: `Beginning of ${topic}'s decline` },
+      { yearOffset: 200, title: 'Fall', description: `End of ${topic}` }
+    ]
+  };
+  
+  // Determine base year and template
+  let baseYear = 1500; // Default
+  let template = templates.war; // Default
+  
+  // Smart topic analysis
+  if (topicLower.includes('revolution')) {
+    template = templates.revolution;
+    if (topicLower.includes('american')) baseYear = 1776;
+    else if (topicLower.includes('french')) baseYear = 1789;
+    else if (topicLower.includes('russian')) baseYear = 1917;
+  } else if (topicLower.includes('empire') || topicLower.includes('rome') || topicLower.includes('egypt')) {
+    template = templates.empire;
+    if (topicLower.includes('rome')) baseYear = 100;
+    else if (topicLower.includes('egypt')) baseYear = -1500;
+  } else if (topicLower.includes('war')) {
+    if (topicLower.includes('world war i') || topicLower.includes('wwi')) baseYear = 1916;
+    else if (topicLower.includes('world war ii') || topicLower.includes('wwii')) baseYear = 1942;
+    else if (topicLower.includes('civil war')) baseYear = 1863;
+  }
+  
+  // Generate events from template
+  return template.map(t => ({
+    year: baseYear + t.yearOffset,
+    title: t.title,
+    description: t.description,
+    source: 'Template'
+  })).filter(event => event.year >= -3000 && event.year <= currentYear);
 }
